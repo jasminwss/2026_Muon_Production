@@ -12,23 +12,79 @@ Jede Produktion besteht aus MuonBack und dem darauf aufbauenden DIS. Sie hat ihr
 
 In den vier SBT-Produktionen kommen Wand- und Rib-Dicke sowie das Material aus `geometry/veto_config_*.yaml` des jeweiligen Branches, nicht aus festen Werten in `veto.cxx`.
 
-## Ablauf
+## DIS-Simulation: alle Befehle in der richtigen Reihenfolge
+
+Eine DIS-Simulation baut immer auf einer fertigen MuonBack-Produktion auf: erst MuonBack, dann die Myon-Auswahl (nTuples), dann DIS. Jeder Schritt startet erst, wenn der vorherige fertig ist.
 
 ```bash
 cd /afs/cern.ch/work/j/jaweiss/private/2026_Muon_Production
-
-./prod status                        # Überblick über alles
-./prod first6_SBT check              # ist der FairShip-Stand bereit?
-
-./prod first6_SBT muonback short     # Test: 5 Jobs
-./prod first6_SBT muonback full      # 8256 Jobs (test500: 500 Jobs)
-./prod first6_SBT ntuple <cluster>   # wenn MuonBack fertig ist
-./prod first6_SBT dis <cluster>      # wenn die nTuples fertig sind
+P=first6_SBT                          # gewünschte Produktion
 ```
 
-`<cluster>` ist immer die Cluster-Nummer der MuonBack-Produktion. `dis` berechnet die Jobzahl selbst aus den nTuple-Logs und lässt Tr aus, wenn dort 0 Myonen sind. Mit `--dry-run` wird nur angezeigt, was submittet würde.
+**1. FairShip-Stand prüfen**
 
-Vor jedem Submit läuft `check`. Es bricht ab, wenn der Worktree auf dem falschen Branch ist, uncommitted Änderungen hat, `muondis-fix` oder die Calo-PID fehlen oder der Build älter als die Geometrie ist.
+```bash
+./prod status                         # Überblick über alle Produktionen
+./prod $P check                       # alle Punkte müssen "ok" sein
+```
+
+**2. MuonBack: Simulation und Reco**
+
+```bash
+./prod $P muonback short              # erst testen: 5 Jobs
+condor_q                              # warten, bis alle Jobs fertig sind
+./prod $P muonback full               # danach alle 8256 Jobs (oder test500: 500 Jobs)
+```
+
+Die Ausgabe von `condor_submit` zeigt die Cluster-Nummer, sie steht auch in `$P/submissions.log`. Das ist das `<cluster>` für die nächsten Schritte.
+
+**3. nTuples: Myonen auswählen, die SBT oder T1 treffen**
+
+```bash
+condor_q                              # MuonBack muss fertig sein, sonst bricht prod ab
+./prod status                         # zeigt, wie viele MuonBack-Jobs fertig sind
+./prod $P ntuple <cluster>
+```
+
+**4. DIS: Simulation und Reco**
+
+```bash
+condor_q                              # der nTuple-Job muss fertig sein
+./prod $P dis <cluster> --dry-run     # zeigt Myonen und Jobzahl, submittet nichts
+./prod $P dis <cluster>
+```
+
+`dis` berechnet die Jobzahl selbst und lässt Tr aus, wenn dort 0 Myonen sind. Pro Job laufen bei SBT 10 Myonen × 100 DIS, bei Tr 1 Myon × 1000 DIS.
+
+**5. Ergebnis prüfen**
+
+Die Condor-Logs erscheinen erst, wenn ein Job zu Ende ist. `<dis-cluster>` ist die Nummer, die `dis` beim Submit ausgibt und die auch in `$P/submissions.log` steht.
+
+```bash
+condor_q                              # noch laufende Jobs
+./prod status                         # zum Beispiel: SBT 630 muons, reco 63/63 jobs
+
+# keine Ausgabe = alle Jobs erfolgreich
+grep -L SUCCESS $P/logs/dis/SBT_<dis-cluster>_*.out
+
+# Calo-PID angewendet? Die Zahl muss der Jobzahl entsprechen
+grep -l "CaloScoringPlanePID: 7 energy" $P/logs/dis/SBT_<dis-cluster>_*.out | wc -l
+```
+
+Für Tr gilt dasselbe mit `Tr_<dis-cluster>_*.out`. Die Ergebnisse liegen in `/eos/user/j/jaweiss/2026_Muon_Production/$P/MuonDIS/<cluster>/`.
+
+**6. Fehlgeschlagene Jobs wiederholen**
+
+```bash
+./prod $P dis <cluster>               # erst submitten, wenn der alte Cluster fertig ist
+```
+
+Fertige Schritte werden dabei übersprungen, wiederholt wird nur, was noch fehlt.
+
+**Wichtig:**
+- `<cluster>` ist bei `ntuple` und `dis` immer die Nummer der MuonBack-Produktion, nicht die des nTuple-Jobs.
+- Vor jedem Submit läuft `check`. Es bricht ab, wenn der Worktree auf dem falschen Branch ist, uncommitted Änderungen hat, `muondis-fix` oder die Calo-PID fehlen oder der Build älter als die Geometrie ist.
+- Mit `--dry-run` zeigen `muonback`, `ntuple` und `dis` nur an, was submittet würde.
 
 ## Wo liegt was
 
