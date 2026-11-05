@@ -1,0 +1,218 @@
+#!/bin/bash
+# Single entry point for all 2026 muon productions, see README.md.
+#   ./prod status                                    overview of all productions
+#   ./prod <production> check                        is its FairShip ready to run?
+#   ./prod <production> muonback short|test500|full  step 1: MuonBack simulation + reco
+#   ./prod <production> ntuple <cluster>             step 2: select muons from a MuonBack cluster
+#   ./prod <production> dis <cluster>                step 3: DIS for the selected muons
+# Add --dry-run to the last three to see what would be submitted, without submitting.
+set -euo pipefail
+shopt -s nullglob
+
+ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+PIPELINE=$ROOT/pipeline
+
+# DIS statistics, the same for all productions.
+SBT_MUONS_PER_JOB=10
+SBT_DIS_PER_MUON=100
+TR_MUONS_PER_JOB=1
+TR_DIS_PER_MUON=1000
+
+DRY_RUN=false
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+usage() { sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
+productions() { local c; for c in "$ROOT"/*/config.sh; do basename "$(dirname "$c")"; done; }
+count() { find -H "$1" -mindepth 2 -maxdepth 2 -name "$2" 2>/dev/null | wc -l; }
+job_folders() { find -H "$1" -mindepth 1 -maxdepth 1 -type d -name 'job_*' | wc -l; }
+
+load_config() {
+    NAME=$1
+    PROD_DIR=$ROOT/$NAME
+    [ -f "$PROD_DIR/config.sh" ] || die "unknown production '$NAME', available: $(productions | tr '\n' ' ')"
+    # shellcheck source=/dev/null
+    source "$PROD_DIR/config.sh"
+    MUONBACK_BASE=$EOS_BASE/MuonBack
+    DIS_BASE=$EOS_BASE/MuonDIS
+}
+
+ok()  { printf '  ok    %s\n' "$1"; }
+bad() { printf '  FAIL  %s\n' "$1"; CHECK_FAILED=true; }
+
+# Everything a job needs from the FairShip worktree of this production.
+check() {
+    CHECK_FAILED=false
+    git -C "$FAIRSHIP" rev-parse --git-dir > /dev/null 2>&1 || { bad "$FAIRSHIP is not a git worktree"; return 1; }
+
+    local current dirty
+    current=$(git -C "$FAIRSHIP" branch --show-current)
+    if [ "$current" = "$BRANCH" ]; then ok "branch $BRANCH"; else bad "$FAIRSHIP is on branch '$current', config.sh wants '$BRANCH'"; fi
+
+    # pixi cvmfs rewrites pixi.lock, so it does not count as a local change
+    dirty=$(git -C "$FAIRSHIP" status --porcelain | grep -v ' pixi.lock$' || true)
+    if [ -z "$dirty" ]; then ok "no uncommitted changes"; else bad "uncommitted changes, the commit in the logs would not describe the jobs: $(echo "$dirty" | awk '{print $2}' | tr '\n' ' ')"; fi
+
+    if git -C "$FAIRSHIP" merge-base --is-ancestor muondis-fix HEAD 2> /dev/null; then ok "contains muondis-fix"; else bad "does not contain muondis-fix (muonDIS helpers would break)"; fi
+
+    if grep -q caloScoringPlanePID "$FAIRSHIP/macro/ShipReco.py" && [ -f "$FAIRSHIP/geometry/caloScoringPlane_pid_provided.yaml" ]; then
+        ok "calo PID available"
+    else
+        bad "no calo PID (--caloScoringPlanePID or the yaml file missing)"
+    fi
+
+    local lib=$FAIRSHIP/build/lib/libveto.so src stale=""
+    if [ -e "$lib" ]; then
+        for src in "$FAIRSHIP/veto/veto.cxx" "$FAIRSHIP/veto/veto.h"; do
+            [ "$src" -nt "$lib" ] && stale="$stale $(basename "$src")"
+        done
+        if [ -z "$stale" ]; then ok "build is newer than the geometry"; else bad "build is older than:$stale -> pixi cvmfs build"; fi
+    else
+        bad "not built -> pixi cvmfs build"
+    fi
+
+    [ "$CHECK_FAILED" = false ]
+}
+
+require_ready() {
+    check > /dev/null || { check || true; die "$NAME is not ready, nothing was submitted"; }
+}
+
+submit() {  # submit <step> <sub file> <description> VAR=VALUE...
+    local step=$1 sub=$2 description=$3
+    shift 3
+    mkdir -p "$PROD_DIR/logs/$step"
+    local vars=(PIPELINE="$PIPELINE" PROD_DIR="$PROD_DIR" FAIRSHIP="$FAIRSHIP" "$@")
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "--- dry run: $step, $description"
+        condor_submit -dry-run - "$sub" "${vars[@]}" 2> /dev/null \
+            | grep -E '^(Args|Arguments|Cmd|Iwd|JobFlavour|TotalSubmitProcs|Out) ?=' | sort -u | head -12 || true
+        return
+    fi
+
+    local output cluster
+    output=$(condor_submit "$sub" "${vars[@]}") || { echo "$output"; die "condor_submit failed"; }
+    echo "$output"
+    cluster=$(grep -oP 'submitted to cluster \K[0-9]+' <<< "$output")
+    printf '%s  %-8s cluster=%-9s %s  branch=%s commit=%s\n' "$(date '+%F %T')" "$step" "$cluster" "$description" \
+        "$BRANCH" "$(git -C "$FAIRSHIP" rev-parse --short HEAD)" >> "$PROD_DIR/submissions.log"
+}
+
+cmd_muonback() {
+    local list=${1:-}
+    local joblist=$PIPELINE/jobs/$list.txt
+    if [ -z "$list" ] || [ ! -f "$joblist" ]; then
+        die "choose a job list: $(cd "$PIPELINE/jobs" && ls | sed 's/\.txt$//' | tr '\n' ' ')"
+    fi
+    require_ready
+    submit muonback "$PIPELINE/muonback.sub" "jobs=$list" MUONBACK_BASE="$MUONBACK_BASE" JOBLIST="$joblist"
+    [ "$DRY_RUN" = true ] || echo "Output: $MUONBACK_BASE/<cluster>   Next: ./prod $NAME ntuple <cluster>"
+}
+
+cmd_ntuple() {
+    local cluster=${1:-}
+    [ -n "$cluster" ] || die "which MuonBack cluster? Available: $(ls "$MUONBACK_BASE" 2> /dev/null | tr '\n' ' ')"
+    local muonback_dir=$MUONBACK_BASE/$cluster outdir=$DIS_BASE/$cluster
+    [ -d "$muonback_dir" ] || die "no MuonBack output $muonback_dir"
+    require_ready
+
+    local active
+    active=$(condor_q "$cluster" -af ProcId 2> /dev/null | wc -l)
+    [ "$active" -eq 0 ] || die "MuonBack cluster $cluster still has $active jobs in the queue"
+    [ ! -e "$outdir/muonsProduction_wsoft_SBT.root" ] || die "nTuples already exist in $outdir, move them away to redo them"
+
+    local folders sims
+    folders=$(job_folders "$muonback_dir")
+    sims=$(count "$muonback_dir" 'sim_*.root')
+    echo "MuonBack $cluster: $sims sim files in $folders job folders"
+    [ "$sims" -eq "$folders" ] || echo "WARNING: $((folders - sims)) job folders have no sim file, those jobs are not in the nTuples"
+    [ "$sims" -gt 0 ] || die "no sim files in $muonback_dir"
+
+    submit ntuple "$PIPELINE/ntuple.sub" "muonback=$cluster files=$sims" MUONBACK_DIR="$muonback_dir" OUTDIR="$outdir"
+    [ "$DRY_RUN" = true ] || echo "Output: $outdir   Next: ./prod $NAME dis $cluster"
+}
+
+entries() {  # number of selected muons from a nTuple log
+    grep -m1 'Total number of entries' "$1" | awk '{print $NF}' || true
+}
+
+submit_dis_sample() {  # <dis dir> <cluster> <sample> <muons per job> <DIS per muon>
+    local dir=$1 cluster=$2 sample=$3 per_job=$4 per_muon=$5 n njobs
+    n=$(entries "$dir/ntuple_$sample.log")
+    [[ "$n" =~ ^[0-9]+$ ]] || die "cannot read the number of muons from $dir/ntuple_$sample.log"
+    if [ "$n" -eq 0 ]; then
+        echo "$sample: 0 muons, nothing to submit"
+        return
+    fi
+    njobs=$(((n + per_job - 1) / per_job))
+    echo "$sample: $n muons -> $njobs jobs ($per_job muons x $per_muon DIS)"
+    submit dis "$PIPELINE/dis.sub" "muonback=$cluster sample=$sample muons=$n jobs=$njobs" \
+        DIS_DIR="$dir" SAMPLE="$sample" MUONS_PER_JOB="$per_job" DIS_PER_MUON="$per_muon" NJOBS="$njobs"
+}
+
+cmd_dis() {
+    local cluster=${1:-}
+    [ -n "$cluster" ] || die "which MuonBack cluster? Available: $(ls "$DIS_BASE" 2> /dev/null | tr '\n' ' ')"
+    local dir=$DIS_BASE/$cluster sample
+    for sample in SBT Tr; do
+        [ -f "$dir/ntuple_$sample.log" ] || die "no $dir/ntuple_$sample.log, first run: ./prod $NAME ntuple $cluster"
+    done
+    require_ready
+    submit_dis_sample "$dir" "$cluster" SBT "$SBT_MUONS_PER_JOB" "$SBT_DIS_PER_MUON"
+    submit_dis_sample "$dir" "$cluster" Tr "$TR_MUONS_PER_JOB" "$TR_DIS_PER_MUON"
+    [ "$DRY_RUN" = true ] || echo "Output: $dir/{SBT,Tr}/job_*   Progress: ./prod status"
+}
+
+dis_progress() {  # <dis dir> <sample> <muons per job>
+    local n
+    n=$(entries "$1/ntuple_$2.log")
+    printf '%s %s muons, reco %s/%s jobs' "$2" "$n" "$(count "$1/$2" 'reco_*.root')" "$(((n + $3 - 1) / $3))"
+}
+
+cmd_status() {
+    local name dir cluster commit state
+    for name in $(productions); do
+        load_config "$name"
+        commit=$(git -C "$FAIRSHIP" rev-parse --short HEAD 2> /dev/null || echo '?')
+        if check > /dev/null 2>&1; then state=ready; else state="NOT READY -> ./prod $name check"; fi
+        printf '%-18s %s @ %s  %s\n' "$name" "$BRANCH" "$commit" "$state"
+
+        local dirs=("$MUONBACK_BASE"/*/)
+        [ "${#dirs[@]}" -gt 0 ] || { echo "    no MuonBack yet"; continue; }
+        for dir in "${dirs[@]}"; do
+            cluster=$(basename "$dir")
+            printf '    %s: MuonBack reco %s/%s jobs' "$cluster" "$(count "$dir" 'reco_*.root')" "$(job_folders "$dir")"
+            if [ -f "$DIS_BASE/$cluster/ntuple_SBT.log" ]; then
+                printf ' | %s | %s' "$(dis_progress "$DIS_BASE/$cluster" SBT "$SBT_MUONS_PER_JOB")" \
+                    "$(dis_progress "$DIS_BASE/$cluster" Tr "$TR_MUONS_PER_JOB")"
+            else
+                printf ' | no nTuples yet'
+            fi
+            echo
+        done
+    done
+}
+
+args=()
+for arg in "$@"; do
+    if [ "$arg" = --dry-run ]; then DRY_RUN=true; else args+=("$arg"); fi
+done
+set -- "${args[@]+"${args[@]}"}"
+
+[ $# -ge 1 ] || usage
+if [ "$1" = status ]; then
+    cmd_status
+    exit 0
+fi
+[ $# -ge 2 ] || usage
+
+load_config "$1"
+step=$2
+shift 2
+case $step in
+    check) echo "$NAME: $FAIRSHIP"; check ;;
+    muonback) cmd_muonback "$@" ;;
+    ntuple) cmd_ntuple "$@" ;;
+    dis) cmd_dis "$@" ;;
+    *) usage ;;
+esac

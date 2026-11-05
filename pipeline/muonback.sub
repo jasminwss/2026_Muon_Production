@@ -1,0 +1,27 @@
+# Filled in by ../prod: PIPELINE, PROD_DIR, FAIRSHIP, MUONBACK_BASE, JOBLIST
+executable = $(PIPELINE)/muonback.sh
+arguments  = "$(FAIRSHIP) $(MUONBACK_BASE) $(inputFile) $(startEvent) $(nEvents) $(Process) $(Cluster)"
+
+initialdir = $(PROD_DIR)/logs/muonback
+output     = job_$(Cluster)_$(Process).out
+error      = job_$(Cluster)_$(Process).err
+log        = job_$(Cluster).log
+
+notify_user  = jasminvweiss@gmail.com
+notification = Error
+
+# values as requested by the TRY6LiSc production (cluster 11921562, see its job log)
+request_CPUs   = 1
+request_memory = 6 GB
+request_disk   = 5 GB
+
++JobFlavour = "tomorrow"
+
+on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)
+max_retries    = 3
+requirements   = (OpSysAndVer =?= "AlmaLinux9") && (Machine =!= LastRemoteHost)
++REQUIRED_OS   = "AlmaLinux9"
+
+max_materialize = 300
+
+queue inputFile,startEvent,nEvents from $(JOBLIST)

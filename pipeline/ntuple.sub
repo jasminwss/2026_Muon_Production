@@ -1,0 +1,24 @@
+# Filled in by ../prod: PIPELINE, PROD_DIR, FAIRSHIP, MUONBACK_DIR, OUTDIR
+executable = $(PIPELINE)/ntuple.sh
+arguments  = "$(FAIRSHIP) $(MUONBACK_DIR) $(OUTDIR) $(NFOLDERS:0)"
+
+initialdir = $(PROD_DIR)/logs/ntuple
+output     = ntuple_$(Cluster).out
+error      = ntuple_$(Cluster).err
+log        = ntuple_$(Cluster).log
+
+notify_user  = jasmin.weiss@student.hu-berlin.de
+notification = Error
+
+request_CPUs   = 1
+request_memory = 4 GB
+request_disk   = 5 GB
+
++JobFlavour = "testmatch"
+
+on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)
+max_retries    = 3
+requirements   = (OpSysAndVer =?= "AlmaLinux9") && (Machine =!= LastRemoteHost)
++REQUIRED_OS   = "AlmaLinux9"
+
+queue
