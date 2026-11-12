@@ -52,12 +52,15 @@ if [ "$firstEvent" -ge "$nMuons" ]; then
     exit 0
 fi
 
-# mkdir -p can race on EOS when all jobs of a cluster create the shared parent dir at once
-# ("File exists" despite -p), and EOS metadata can lag a beat; retry a few times before giving up.
-for attempt in 1 2 3 4 5; do
+# prod creates the parent directory the jobs share, so normally only job_<n>/ is created here. If a job
+# is still first: mkdir -p can race on EOS when all jobs of a cluster create the parent at once ("File exists"
+# despite -p), and the parent can stay invisible to this node for a while, so the -d check misses it as well.
+# 5 tries within 8 s were not enough (DIS clusters 13131080/81: 63 of 68 jobs failed their first attempt).
+# Hence about 3 min of retries, spaced randomly so that the jobs do not retry in lockstep.
+for attempt in {1..12}; do
     mkdir -p "$OUTPUTDIR" && break
     [ -d "$OUTPUTDIR" ] && break
-    sleep 2
+    sleep $((RANDOM % 20 + 5))
 done
 [ -d "$OUTPUTDIR" ] || { echo "ERROR: could not create $OUTPUTDIR"; exit 1; }
 
@@ -110,6 +113,7 @@ echo "=============================================================="
 "${PIXI_RUN[@]}" python "$FAIRSHIP/macro/ShipReco.py" \
     -f "sim_${TAG}.root" \
     -g "geo_${TAG}.root" \
+    --trackFitter acts \
     --caloScoringPlanePID "$FAIRSHIP/geometry/caloScoringPlane_pid_provided.yaml" | tee simRunOutput_2.txt
 
 [ -f "sim_${TAG}_rec.root" ] || { echo "ERROR: reco output not produced"; ls -lh; exit 1; }

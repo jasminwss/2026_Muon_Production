@@ -9,6 +9,8 @@ Jede Produktion besteht aus MuonBack und dem darauf aufbauenden DIS. Sie hat ihr
 | `first6_SBT` | `FairShip_first6` | `sbt-first6` | nur die ersten 37 Zellen |
 | `last5_SBT` | `FairShip_last5` | `sbt-last5` | nur die letzten 30 Zellen |
 | `support_structure` | `FairShip_support` | `support-structure` | nur Stahlstruktur, sensitiv |
+| `no_SBT` | `FairShip_noSBT` | `no-SBT` | kein SBT |
+| `no_SBT_no_balloon` | `FairShip_noSBTnoballoon` | `no-SBT-no-balloon` | kein SBT und kein He- Balloon |
 
 In den vier SBT-Produktionen kommen Wand- und Rib-Dicke sowie das Material aus `geometry/veto_config_*.yaml` des jeweiligen Branches, nicht aus festen Werten in `veto.cxx`.
 

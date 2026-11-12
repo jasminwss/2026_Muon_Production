@@ -1,1 +1,5 @@
 2026-11-05 12:52:49  muonback cluster=13130879  jobs=short  branch=sbt-sides commit=03437fb42
+2026-11-06 08:54:58  muonback cluster=13136806  jobs=test500  branch=sbt-sides commit=03437fb42
+2026-11-06 16:25:43  ntuple   cluster=13139075  muonback=13136806 files=500  branch=sbt-sides commit=03437fb42
+2026-11-06 16:42:07  dis      cluster=13139076  muonback=13136806 sample=SBT muons=191 jobs=20  branch=sbt-sides commit=03437fb42
+2026-11-06 16:42:07  dis      cluster=13139077  muonback=13136806 sample=Tr muons=2 jobs=2  branch=sbt-sides commit=03437fb42

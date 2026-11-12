@@ -60,6 +60,13 @@ check() {
         bad "no calo PID (--caloScoringPlanePID or the yaml file missing)"
     fi
 
+    # the pipeline runs ShipReco.py with --trackFitter acts
+    if grep -q '"acts"' "$FAIRSHIP/macro/ShipReco.py" && [ -e "$FAIRSHIP/build/lib/libShipActsTracking.so" ]; then
+        ok "ACTS track fitter available"
+    else
+        bad "no ACTS track fitter (--trackFitter acts or build/lib/libShipActsTracking.so missing)"
+    fi
+
     local lib=$FAIRSHIP/build/lib/libveto.so src stale=""
     if [ -e "$lib" ]; then
         for src in "$FAIRSHIP/veto/veto.cxx" "$FAIRSHIP/veto/veto.h"; do
@@ -94,6 +101,7 @@ submit() {  # submit <step> <sub file> <description> VAR=VALUE...
     output=$(condor_submit "$sub" "${vars[@]}") || { echo "$output"; die "condor_submit failed"; }
     echo "$output"
     cluster=$(grep -oP 'submitted to cluster \K[0-9]+' <<< "$output")
+    SUBMITTED_CLUSTER=$cluster
     printf '%s  %-8s cluster=%-9s %s  branch=%s commit=%s\n' "$(date '+%F %T')" "$step" "$cluster" "$description" \
         "$BRANCH" "$(git -C "$FAIRSHIP" rev-parse --short HEAD)" >> "$PROD_DIR/submissions.log"
 }
@@ -106,7 +114,12 @@ cmd_muonback() {
     fi
     require_ready
     submit muonback "$PIPELINE/muonback.sub" "jobs=$list" MUONBACK_BASE="$MUONBACK_BASE" JOBLIST="$joblist"
-    [ "$DRY_RUN" = true ] || echo "Output: $MUONBACK_BASE/<cluster>   Next: ./prod $NAME ntuple <cluster>"
+    [ "$DRY_RUN" = true ] && return
+    # Create the parent the jobs share, so they only create their own job_<n>/ (mkdir race on EOS, see muonback.sh).
+    # The cluster number only exists after submitting, but jobs take minutes to start. Do not use hold + condor_release
+    # instead: with max_materialize, jobs materialized after the release would come up held as well.
+    mkdir -p "$MUONBACK_BASE/$SUBMITTED_CLUSTER" || echo "WARNING: could not create $MUONBACK_BASE/$SUBMITTED_CLUSTER, the jobs will try themselves"
+    echo "Output: $MUONBACK_BASE/$SUBMITTED_CLUSTER   Next: ./prod $NAME ntuple $SUBMITTED_CLUSTER"
 }
 
 cmd_ntuple() {
@@ -146,6 +159,10 @@ submit_dis_sample() {  # <dis dir> <cluster> <sample> <muons per job> <DIS per m
     fi
     njobs=$(((n + per_job - 1) / per_job))
     echo "$sample: $n muons -> $njobs jobs ($per_job muons x $per_muon DIS)"
+    # Create the parent the jobs share, so they only create their own job_<n>/ (mkdir race on EOS, see dis.sh).
+    if [ "$DRY_RUN" != true ]; then
+        mkdir -p "$dir/$sample" || die "cannot create $dir/$sample, nothing was submitted for $sample"
+    fi
     submit dis "$PIPELINE/dis.sub" "muonback=$cluster sample=$sample muons=$n jobs=$njobs" \
         DIS_DIR="$dir" SAMPLE="$sample" MUONS_PER_JOB="$per_job" DIS_PER_MUON="$per_muon" NJOBS="$njobs"
 }
